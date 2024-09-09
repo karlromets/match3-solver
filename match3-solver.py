@@ -2,31 +2,23 @@ import pyautogui
 import cv2
 import numpy as np
 import time
-import threading
 from pynput import keyboard
 import math
 import pydirectinput
 import pyautogui
-import multiprocessing
 import os
+from joblib import Parallel, delayed
 
 def process_cell(args):
-    self, grid_x, grid_y, board_gray, cell_width, cell_height, scaled_templates = args
-    cell_x_start = grid_x * cell_width
-    cell_y_start = grid_y * cell_height
-    cell_x_end = cell_x_start + cell_width
-    cell_y_end = cell_y_start + cell_height
-
-    cell_region = board_gray[cell_y_start:cell_y_end, cell_x_start:cell_x_end]
-
+    self, grid_x, grid_y, cell_region, scaled_templates = args
     for obj_name, templates in scaled_templates.items():
         for template in templates:
             matches = cv2.matchTemplate(cell_region, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(matches)
             if max_val >= 0.85:
                 template_width, template_height = template.shape[1::-1]
-                obj_center = (cell_x_start + max_loc[0] + template_width // 2, 
-                              cell_y_start + max_loc[1] + template_height // 2)
+                obj_center = (max_loc[0] + template_width // 2, 
+                              max_loc[1] + template_height // 2)
                 return (grid_x, grid_y), (obj_center, obj_name)
 
     return (grid_x, grid_y), (None, 'unknown')
@@ -113,22 +105,25 @@ class Match3Solver:
             scaled_templates[obj_name] = [cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR) 
                                         for scale in np.linspace(0.9, 1.1, 3)]  # Reduced to 3 scales
 
-        # Prepare arguments for multiprocessing
-        args = []
+        cell_regions = {}
         for x in range(grid_size[0]):
             for y in range(grid_size[1]):
-                if known_objects and (x, y) in known_objects:
-                    objects[(x, y)] = known_objects[(x, y)]
-                else:
-                    args.append((self, x, y, board_gray, cell_width, cell_height, scaled_templates))
-
-        # Use multiprocessing to process cells in parallel
-        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:  # Ensure full CPU utilization
-            results = pool.map(process_cell, args)
+                cell_x_start = x * cell_width
+                cell_y_start = y * cell_height
+                cell_x_end = cell_x_start + cell_width
+                cell_y_end = cell_y_start + cell_height
+                cell_regions[(x, y)] = board_gray[cell_y_start:cell_y_end, cell_x_start:cell_x_end]
+        
+        results = Parallel(n_jobs=-1)(
+            delayed(process_cell)((self, x, y, cell_regions[(x, y)], scaled_templates))
+            for x in range(grid_size[0])
+            for y in range(grid_size[1])
+            if not known_objects or (x, y) not in known_objects
+        )
 
         objects.update(dict(results))
 
-                # Save the debug image with detected objects
+        # Save the debug image with detected objects
         for (grid_x, grid_y), (pt, obj_name) in objects.items():
             cell_x_start = grid_x * cell_width
             cell_y_start = grid_y * cell_height
@@ -250,11 +245,11 @@ class Match3Solver:
 
         move_time = time.time() - start_time
         self.move_times.append(move_time)
-        self.print_averages()
 
     def wait_for_board_stability(self, max_wait_time=10):
         start_time = time.time()
         last_board = None
+        popup_detected = False
         check_interval = 0.5  # Check every 0.5 seconds
         known_objects = {}
         total_time = 0
@@ -390,6 +385,7 @@ class Match3Solver:
                 self.wait_for_board_stability()
                 total_move_time = time.time() - move_start_time
                 self.total_move_times.append(total_move_time)
+                self.print_averages()
             else:
                 print("No moves found")
                 break
@@ -407,6 +403,5 @@ class Match3Solver:
         listener.start()
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
     bot = Match3Solver()
     bot.play()
