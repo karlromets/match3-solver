@@ -11,19 +11,19 @@ import multiprocessing
 import os
 
 def process_cell(args):
-    self, grid_x, grid_y, board_rgb, cell_width, cell_height, scaled_templates = args
+    self, grid_x, grid_y, board_gray, cell_width, cell_height, scaled_templates = args
     cell_x_start = grid_x * cell_width
     cell_y_start = grid_y * cell_height
     cell_x_end = cell_x_start + cell_width
     cell_y_end = cell_y_start + cell_height
 
-    cell_region = board_rgb[cell_y_start:cell_y_end, cell_x_start:cell_x_end]
+    cell_region = board_gray[cell_y_start:cell_y_end, cell_x_start:cell_x_end]
 
     for obj_name, templates in scaled_templates.items():
         for template in templates:
             matches = cv2.matchTemplate(cell_region, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(matches)
-            if max_val >= 0.9:
+            if max_val >= 0.85:
                 template_width, template_height = template.shape[1::-1]
                 obj_center = (cell_x_start + max_loc[0] + template_width // 2, 
                               cell_y_start + max_loc[1] + template_height // 2)
@@ -50,18 +50,16 @@ class Match3Solver:
         self.move_times = []
         self.stability_times = []
         self.total_move_times = []
-        self.popup_shown = False
-        self.current_task = "Initializing"
 
     def load_templates(self):
         start_time = time.time()
         templates = {
-            'object1': cv2.imread('object1_template.png'),
-            'object2': cv2.imread('object2_template.png'),
-            'object3': cv2.imread('object3_template.png'),
-            'object4': cv2.imread('object4_template.png'),
-            'object5': cv2.imread('object5_template.png'),
-            'object6': cv2.imread('object6_template.png')
+            'object1': cv2.imread('object1_template.png', cv2.IMREAD_GRAYSCALE),
+            'object2': cv2.imread('object2_template.png', cv2.IMREAD_GRAYSCALE),
+            'object3': cv2.imread('object3_template.png', cv2.IMREAD_GRAYSCALE),
+            'object4': cv2.imread('object4_template.png', cv2.IMREAD_GRAYSCALE),
+            'object5': cv2.imread('object5_template.png', cv2.IMREAD_GRAYSCALE),
+            'object6': cv2.imread('object6_template.png', cv2.IMREAD_GRAYSCALE)
         }
         for name, template in templates.items():
             if template is None:
@@ -83,17 +81,16 @@ class Match3Solver:
 
         # Capture only the region of interest
         screen = np.array(pyautogui.screenshot(region=(roi_left, roi_top, roi_width, roi_height)))
-        screen_rgb = cv2.cvtColor(screen, cv2.COLOR_BGR2RGB)
+        screen_gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
 
-        template = cv2.imread('board_template.png')
-        template_rgb = cv2.cvtColor(template, cv2.COLOR_BGR2RGB)
+        template = cv2.imread('board_template.png', cv2.IMREAD_GRAYSCALE)
 
-        res = cv2.matchTemplate(screen_rgb, template_rgb, cv2.TM_CCOEFF_NORMED)
+        res = cv2.matchTemplate(screen_gray, template, cv2.TM_CCOEFF_NORMED)
         _, _, _, max_loc = cv2.minMaxLoc(res)
 
         # Adjust the coordinates to account for the ROI offset
         top_left = (roi_left + max_loc[0], roi_top + max_loc[1])
-        h, w = template_rgb.shape[:2]
+        h, w = template.shape[:2]
 
 
         return (top_left[0], top_left[1], w, h)
@@ -103,7 +100,7 @@ class Match3Solver:
         start_time = time.time()
         # Capture the game board region
         board_img = np.array(pyautogui.screenshot(region=self.board_region))
-        board_rgb = cv2.cvtColor(board_img, cv2.COLOR_BGR2RGB)
+        board_gray = cv2.cvtColor(board_img, cv2.COLOR_BGR2GRAY)
         objects = {}
 
         grid_size = (6, 7)
@@ -123,16 +120,28 @@ class Match3Solver:
                 if known_objects and (x, y) in known_objects:
                     objects[(x, y)] = known_objects[(x, y)]
                 else:
-                    args.append((self, x, y, board_rgb, cell_width, cell_height, scaled_templates))
+                    args.append((self, x, y, board_gray, cell_width, cell_height, scaled_templates))
 
         # Use multiprocessing to process cells in parallel
         with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:  # Ensure full CPU utilization
             results = pool.map(process_cell, args)
 
-        # Filter out invalid objects
-        for (grid_pos, (obj_center, obj_name)) in results:
-            if obj_name != 'unknown':
-                objects[grid_pos] = (obj_center, obj_name)
+        objects.update(dict(results))
+
+                # Save the debug image with detected objects
+        for (grid_x, grid_y), (pt, obj_name) in objects.items():
+            cell_x_start = grid_x * cell_width
+            cell_y_start = grid_y * cell_height
+            cell_x_end = cell_x_start + cell_width
+            cell_y_end = cell_y_start + cell_height
+            cv2.putText(board_img, obj_name, (cell_x_start + 5, cell_y_start + 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.colors.get(obj_name, (255, 255, 255)), 1)
+            cv2.rectangle(board_img, (cell_x_start, cell_y_start), 
+                          (cell_x_end, cell_y_end), (0, 255, 0), 2)
+
+        cv2.imshow('Detected Objects', board_img)
+        cv2.waitKey(1)
+        cv2.imwrite("debug_detected_objects.png", board_img)
 
         locate_time = time.time() - start_time
         self.locate_times.append(locate_time)
@@ -241,17 +250,16 @@ class Match3Solver:
 
         move_time = time.time() - start_time
         self.move_times.append(move_time)
+        self.print_averages()
 
     def wait_for_board_stability(self, max_wait_time=10):
         start_time = time.time()
         last_board = None
-        self.current_task = "wait_for_board_stability"
-        self.print_averages()
-        check_interval = 1  # Check every 0.5 seconds
+        check_interval = 0.5  # Check every 0.5 seconds
         known_objects = {}
         total_time = 0
 
-        while True:
+        while time.time() - start_time < max_wait_time:
             current_board = np.array(pyautogui.screenshot(region=self.board_region))
             
             if last_board is not None and np.array_equal(current_board, last_board):
@@ -262,41 +270,30 @@ class Match3Solver:
             last_board = current_board
 
             # Check for popup every 1.5 seconds
-            if time.time() - total_time >= 1.5:
-                self.current_task = "locate_objects"
-                self.print_averages()
+            if time.time() - start_time >= 1.5:
                 objects = self.locate_objects(known_objects)
                 if len(objects) < 42:
-                    self.popup_shown = True
-                    self.print_averages()
+                    print(f"Popup detected. Found {len(objects)} objects.")
                     known_objects = objects
-                    self.current_task = "find_match_outside_popup"
-                    self.print_averages()
                     match = self.find_match_outside_popup(objects)
                 else:
-                    self.current_task = "find_match"
-                    self.print_averages()
                     match = self.find_match(objects)
                     
                 # Try to find a match even if the popup is up
                 if match:
-                    self.current_task = "make_move"
-                    self.print_averages()
                     self.make_move(*match)
                     total_time = time.time() - start_time  # Calculate total time
                     self.total_move_times.append(total_time)  # Append total time
+                    start_time = time.time()  # Reset the timer
                     last_board = None
-                    self.print_averages()
                     known_objects = {}
-                    start_time = time.time()  # Reset the timer after a move
                 else:
                     print("No moves found")
 
-            if time.time() - start_time >= max_wait_time:
-                print("Board did not stabilize within the maximum wait time.")
-                return False
-
             time.sleep(check_interval)
+
+        print("Board did not stabilize within the maximum wait time.")
+        return False
 
     def find_match_outside_popup(self, objects):
         start_time = time.time()
@@ -378,26 +375,21 @@ class Match3Solver:
         print(f"Avg. time to make move: {avg_move:.2f}s")
         print(f"Avg. time waiting for board stability: {avg_stability:.2f}s")
         print(f"Avg. total time: {avg_total:.2f}s")
-        print(f"popup_shown={self.popup_shown}")
-        print(f"current_task={self.current_task}")
 
     def play(self):
         while self.running:
             move_start_time = time.time()
+            
             objects = self.locate_objects()
             if len(objects) != 42:
-                match = self.find_match_outside_popup(objects)
-            else:
-                match = self.find_match(objects)
+                print(f"Expected 42 objects, but found {len(objects)}")
+                break
+            match = self.find_match(objects)
             if match:
                 self.make_move(*match)
-                if self.wait_for_board_stability():
-                    total_move_time = time.time() - move_start_time
-                    self.total_move_times.append(total_move_time)
-                    self.print_averages()
-                else:
-                    print("Board did not stabilize")
-                    break
+                self.wait_for_board_stability()
+                total_move_time = time.time() - move_start_time
+                self.total_move_times.append(total_move_time)
             else:
                 print("No moves found")
                 break
