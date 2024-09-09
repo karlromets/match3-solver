@@ -2,6 +2,7 @@ import pyautogui
 import cv2
 import numpy as np
 import time
+import threading
 from pynput import keyboard
 import math
 import pydirectinput
@@ -103,7 +104,7 @@ class Match3Solver:
         scaled_templates = {}
         for obj_name, template in self.templates.items():
             scaled_templates[obj_name] = [cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR) 
-                                        for scale in np.linspace(0.9, 1.1, 3)]  # Reduced to 3 scales
+                                        for scale in np.linspace(0.9, 1.1, 3)] 
 
         cell_regions = {}
         for x in range(grid_size[0]):
@@ -168,16 +169,18 @@ class Match3Solver:
             
             max_length = 0
             total_matches = 0
+            combo_score = 0
             for dx, dy in [(1, 0), (0, 1)]:
                 for x, y in [(x1, y1), (x2, y2)]:
                     length = find_chain_length(x, y, dx, dy) + find_chain_length(x, y, -dx, -dy) - 1
                     if length >= 3:
                         max_length = max(max_length, length)
                         total_matches += 1
+                        combo_score += length * (grid_size[1] - y)  # Prioritize lower matches
             
             readable_grid[x1][y1], readable_grid[x2][y2] = readable_grid[x2][y2], readable_grid[x1][y1]
             
-            return max_length, total_matches
+            return max_length, total_matches, combo_score
 
         def find_all_swaps():
             swaps = []
@@ -189,25 +192,27 @@ class Match3Solver:
                         swaps.append(((x, y), (x, y + 1)))
             return swaps
 
-        def backtrack(swaps):
-            best_match = None
-            best_score = 0
-
-            for swap in swaps:
-                (x1, y1), (x2, y2) = swap
-                swap_length, total_matches = evaluate_swap(x1, y1, x2, y2)
-                score = swap_length + total_matches * 2  # Prioritize multiple matches
-                if swap_length >= 3 and score > best_score:
-                    best_score = score
-                    best_match = ((x1, y1), (x2, y2))
-
-            return best_match
-
         swaps = find_all_swaps()
-        best_match = backtrack(swaps)
+        best_swap = None
+        best_score = -1
+
+        for swap in swaps:
+            (x1, y1), (x2, y2) = swap
+            max_length, total_matches, combo_score = evaluate_swap(x1, y1, x2, y2)
+            
+            # Prioritize vertical matches slightly
+            vertical_bonus = 1.1 if abs(y2 - y1) == 1 else 1
+            
+            # Calculate overall score
+            score = (max_length * 2 + total_matches * 3 + combo_score) * vertical_bonus
+            
+            if score > best_score:
+                best_score = score
+                best_swap = swap
+
         match_time = time.time() - start_time
         self.match_times.append(match_time)
-        return best_match
+        return best_swap
 
     # Function for smoothly moving the cursor and holding down the mouse button until the movement is completed
     @staticmethod
