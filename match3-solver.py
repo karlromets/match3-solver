@@ -2,9 +2,33 @@ import pyautogui
 import cv2
 import numpy as np
 import time
+import threading
 from pynput import keyboard
 import math
 import pydirectinput
+import pyautogui
+import multiprocessing
+
+def process_cell(args):
+    self, grid_x, grid_y, board_rgb, cell_width, cell_height, scaled_templates = args
+    cell_x_start = grid_x * cell_width
+    cell_y_start = grid_y * cell_height
+    cell_x_end = cell_x_start + cell_width
+    cell_y_end = cell_y_start + cell_height
+
+    cell_region = board_rgb[cell_y_start:cell_y_end, cell_x_start:cell_x_end]
+
+    for obj_name, templates in scaled_templates.items():
+        for template in templates:
+            matches = cv2.matchTemplate(cell_region, template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(matches)
+            if max_val >= 0.8:
+                template_width, template_height = template.shape[1::-1]
+                obj_center = (cell_x_start + max_loc[0] + template_width // 2, 
+                              cell_y_start + max_loc[1] + template_height // 2)
+                return (grid_x, grid_y), (obj_center, obj_name)
+
+    return (grid_x, grid_y), (None, 'unknown')
 
 class Match3Solver:
     def __init__(self):
@@ -16,13 +40,13 @@ class Match3Solver:
             'object3': (0, 0, 255), # Red
             'object4': (255, 255, 0), # Cyan
             'object5': (0, 255, 255), # Yellow
-            'object6': (255, 0, 255)  # Magenta
+            'object6': (255, 0, 255) # Magenta
         }
         self.running = True
         self.setup_key_listener()
 
     def load_templates(self):
-        # Load and verify template images for each object
+        # Load template images for each object
         templates = {
             'object1': cv2.imread('object1_template.png'),
             'object2': cv2.imread('object2_template.png'),
@@ -75,57 +99,26 @@ class Match3Solver:
         cell_width = self.board_region[2] // grid_size[0]
         cell_height = self.board_region[3] // grid_size[1]
 
-        # Define RGB colors for grid cell backgrounds and borders
-        grid_cell_bg_color = (251, 246, 245)
-        grid_cell_border_color = (255, 231, 239)
-        whole_grid_border_color = (250, 240, 239)
-        additional_border_color = (0, 0, 0)
+        # Pre-compute scaled templates
+        scaled_templates = {}
+        for obj_name, template in self.templates.items():
+            scaled_templates[obj_name] = [cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR) 
+                                          for scale in np.linspace(0.8, 1.2, 5)]
 
-        for grid_x in range(grid_size[0]):
-            for grid_y in range(grid_size[1]):
-                cell_x_start = grid_x * cell_width
-                cell_y_start = grid_y * cell_height
-                cell_x_end = cell_x_start + cell_width
-                cell_y_end = cell_y_start + cell_height
+        # Prepare arguments for multiprocessing
+        args = [(self, x, y, board_rgb, cell_width, cell_height, scaled_templates) 
+                for x in range(grid_size[0]) for y in range(grid_size[1])]
 
-                cell_region = board_rgb[cell_y_start:cell_y_end, cell_x_start:cell_x_end]
+        # Use multiprocessing to process cells in parallel
+        with multiprocessing.Pool() as pool:
+            results = pool.map(process_cell, args)
 
-                grid_index = grid_y * grid_size[0] + grid_x
-                cv2.putText(board_img, str(grid_index), (cell_x_start + 5, cell_y_start + 20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                cv2.rectangle(board_img, (cell_x_start, cell_y_start), 
-                            (cell_x_end, cell_y_end), (0, 255, 0), 2)
-                
-                detected = False
-                for obj_name, template in self.templates.items():
-                    detected = False
-                    for scale in np.linspace(0.5, 1.5, 20):
-                        resized_template = cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-                        matches = cv2.matchTemplate(cell_region, resized_template, cv2.TM_CCOEFF_NORMED)
-                        _, max_val, _, max_loc = cv2.minMaxLoc(matches)
-                        if max_val >= 0.7:
-                            template_width, template_height = resized_template.shape[1::-1]
-                            obj_center = (cell_x_start + max_loc[0] + template_width // 2, cell_y_start + max_loc[1] + template_height // 2)
-                            objects[(grid_x, grid_y)] = (obj_center, obj_name)
-                            cv2.putText(board_img, obj_name, (cell_x_start + 5, cell_y_start + 40), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.colors[obj_name], 1)
-                            
-                            detected = True
-                            break
-                    if detected:
-                        break
-                
-                if not detected:
-                    # If no object detected in the cell, mark it as unknown
-                    objects[(grid_x, grid_y)] = (None, 'unknown')
+        objects = dict(results)
 
         if len(objects) != 42:
             print(f"Expected 42 objects, but found {len(objects)}")
             return {}
 
-        cv2.imshow('Detected Objects', board_img)
-        cv2.waitKey(1)
-        cv2.imwrite("debug_detected_objects.png", board_img)
         print(f"Detected {len(objects)} unique objects")
         return objects
 
@@ -161,14 +154,18 @@ class Match3Solver:
             
             # Check for matches
             max_length = 0
+            additional_matches = 0
             for dx, dy in [(1, 0), (0, 1)]:
-                max_length = max(max_length, find_chain_length(x1, y1, dx, dy) + find_chain_length(x1, y1, -dx, -dy) - 1)
-                max_length = max(max_length, find_chain_length(x2, y2, dx, dy) + find_chain_length(x2, y2, -dx, -dy) - 1)
+                for x, y in [(x1, y1), (x2, y2)]:
+                    length = find_chain_length(x, y, dx, dy) + find_chain_length(x, y, -dx, -dy) - 1
+                    if length >= 3:
+                        max_length = max(max_length, length)
+                        additional_matches += 1 if length > 3 else 0
             
             # Swap back
             readable_grid[x1][y1], readable_grid[x2][y2] = readable_grid[x2][y2], readable_grid[x1][y1]
             
-            return max_length
+            return max_length, additional_matches
 
         def find_all_swaps():
             swaps = []
@@ -182,12 +179,29 @@ class Match3Solver:
 
         def backtrack(swaps):
             best_match = None
-            best_length = 0
-            for (x1, y1), (x2, y2) in swaps:
-                swap_length = evaluate_swap(x1, y1, x2, y2)
-                if swap_length >= 3 and swap_length > best_length:
-                    best_length = swap_length
-                    best_match = ((x1, y1), (x2, y2))
+            best_score = 0
+            lock = threading.Lock()
+
+            def evaluate_and_update_best(swap):
+                nonlocal best_match, best_score
+                (x1, y1), (x2, y2) = swap
+                swap_length, additional_matches = evaluate_swap(x1, y1, x2, y2)
+                score = swap_length + additional_matches * 2  # Prioritize additional matches
+                if swap_length >= 3 and score > best_score:
+                    with lock:
+                        if score > best_score:
+                            best_score = score
+                            best_match = ((x1, y1), (x2, y2))
+
+            threads = []
+            for swap in swaps:
+                thread = threading.Thread(target=evaluate_and_update_best, args=(swap,))
+                threads.append(thread)
+                thread.start()
+
+            for thread in threads:
+                thread.join()
+
             return best_match
 
         swaps = find_all_swaps()
@@ -253,13 +267,13 @@ class Match3Solver:
         pydirectinput.mouseDown()
         
         # drag to the end pos
-        pydirectinput.moveTo(end_center_x, end_center_y, duration=0.3)
+        pydirectinput.moveTo(end_center_x, end_center_y, duration=0.1)
 
         # dont let go until we arrive
         while Match3Solver.distance(pydirectinput.position(), (end_center_x, end_center_y)) > 2:  # Ignore distance to endpoint
-            time.sleep(0.2)
+            time.sleep(0.1)
         # let go
-        time.sleep(0.1)
+        time.sleep(0.05)
         pydirectinput.mouseUp()
 
     def wait_for_board_stability(self, max_wait_time=10):
@@ -278,7 +292,7 @@ class Match3Solver:
                     return True
             
             last_board = current_board
-            time.sleep(0.2)  # Check every 0.2 seconds
+            time.sleep(0.05)  # Check every 0.05 seconds
 
         print("Board did not stabilize within the maximum wait time.")
         return False
@@ -314,5 +328,6 @@ class Match3Solver:
         listener.start()
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()  # This line is necessary for Windows
     bot = Match3Solver()
     bot.play()
