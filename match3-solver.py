@@ -123,7 +123,7 @@ class Match3Solver:
 
         objects.update(dict(results))
 
-        # Save the debug image with detected objects
+                # Save the debug image with detected objects
         for (grid_x, grid_y), (pt, obj_name) in objects.items():
             cell_x_start = grid_x * cell_width
             cell_y_start = grid_y * cell_height
@@ -216,7 +216,7 @@ class Match3Solver:
 
     def make_move(self, start, end):
         start_time = time.time()
-        pydirectinput.PAUSE = 0.005
+        pydirectinput.PAUSE = 0.01
         
         # Unpack board_region (assuming it's correctly defined)
         top_left_x, top_left_y, board_width, board_height = self.board_region
@@ -247,12 +247,11 @@ class Match3Solver:
         self.move_times.append(move_time)
 
     def wait_for_board_stability(self, max_wait_time=10):
+        function_start_time = time.time()  # Start timing the entire function execution
         start_time = time.time()
         last_board = None
-        popup_detected = False
         check_interval = 0.5  # Check every 0.5 seconds
         known_objects = {}
-        total_time = 0
 
         while time.time() - start_time < max_wait_time:
             current_board = np.array(pyautogui.screenshot(region=self.board_region))
@@ -260,6 +259,8 @@ class Match3Solver:
             if last_board is not None and np.array_equal(current_board, last_board):
                 stability_time = time.time() - start_time
                 self.stability_times.append(stability_time)
+                function_duration = time.time() - function_start_time  # Calculate total function duration
+                self.stability_times.append(function_duration)  # Append total function duration
                 return True
             
             last_board = current_board
@@ -277,8 +278,6 @@ class Match3Solver:
                 # Try to find a match even if the popup is up
                 if match:
                     self.make_move(*match)
-                    total_time = time.time() - start_time  # Calculate total time
-                    self.total_move_times.append(total_time)  # Append total time
                     start_time = time.time()  # Reset the timer
                     last_board = None
                     known_objects = {}
@@ -288,6 +287,8 @@ class Match3Solver:
             time.sleep(check_interval)
 
         print("Board did not stabilize within the maximum wait time.")
+        function_duration = time.time() - function_start_time  # Calculate total function duration
+        self.stability_times.append(function_duration)  # Append total function duration
         return False
 
     def find_match_outside_popup(self, objects):
@@ -363,7 +364,9 @@ class Match3Solver:
         avg_match = sum(self.match_times) / len(self.match_times) if self.match_times else 0
         avg_move = sum(self.move_times) / len(self.move_times) if self.move_times else 0
         avg_stability = sum(self.stability_times) / len(self.stability_times) if self.stability_times else 0
-        avg_total = sum(self.total_move_times) / len(self.total_move_times) if self.total_move_times else 0
+        
+        # Calculate avg_total as the sum of the other averages
+        avg_total = avg_locate + avg_match + avg_move + avg_stability
 
         print(f"Avg. time to locate objects: {avg_locate:.2f}s")
         print(f"Avg. time to find match: {avg_match:.2f}s")
@@ -373,19 +376,15 @@ class Match3Solver:
 
     def play(self):
         while self.running:
-            move_start_time = time.time()
-            
             objects = self.locate_objects()
             if len(objects) != 42:
                 print(f"Expected 42 objects, but found {len(objects)}")
                 break
             match = self.find_match(objects)
             if match:
+                self.print_averages()
                 self.make_move(*match)
                 self.wait_for_board_stability()
-                total_move_time = time.time() - move_start_time
-                self.total_move_times.append(total_move_time)
-                self.print_averages()
             else:
                 print("No moves found")
                 break
