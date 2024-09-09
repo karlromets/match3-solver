@@ -23,7 +23,7 @@ def process_cell(args):
         for template in templates:
             matches = cv2.matchTemplate(cell_region, template, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(matches)
-            if max_val >= 0.8:
+            if max_val >= 0.9:
                 template_width, template_height = template.shape[1::-1]
                 obj_center = (cell_x_start + max_loc[0] + template_width // 2, 
                               cell_y_start + max_loc[1] + template_height // 2)
@@ -50,6 +50,8 @@ class Match3Solver:
         self.move_times = []
         self.stability_times = []
         self.total_move_times = []
+        self.popup_shown = False
+        self.current_task = "Initializing"
 
     def load_templates(self):
         start_time = time.time()
@@ -64,6 +66,7 @@ class Match3Solver:
         for name, template in templates.items():
             if template is None:
                 print(f"Failed to load template: {name}")
+
         print(f"Time to load templates: {time.time() - start_time:.2f} seconds")
         return templates
 
@@ -91,6 +94,7 @@ class Match3Solver:
         # Adjust the coordinates to account for the ROI offset
         top_left = (roi_left + max_loc[0], roi_top + max_loc[1])
         h, w = template_rgb.shape[:2]
+
 
         return (top_left[0], top_left[1], w, h)
 
@@ -125,7 +129,10 @@ class Match3Solver:
         with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:  # Ensure full CPU utilization
             results = pool.map(process_cell, args)
 
-        objects.update(dict(results))
+        # Filter out invalid objects
+        for (grid_pos, (obj_center, obj_name)) in results:
+            if obj_name != 'unknown':
+                objects[grid_pos] = (obj_center, obj_name)
 
         locate_time = time.time() - start_time
         self.locate_times.append(locate_time)
@@ -238,12 +245,13 @@ class Match3Solver:
     def wait_for_board_stability(self, max_wait_time=10):
         start_time = time.time()
         last_board = None
-        popup_detected = False
-        check_interval = 0.5  # Check every 0.5 seconds
+        self.current_task = "wait_for_board_stability"
+        self.print_averages()
+        check_interval = 1  # Check every 0.5 seconds
         known_objects = {}
         total_time = 0
 
-        while time.time() - start_time < max_wait_time:
+        while True:
             current_board = np.array(pyautogui.screenshot(region=self.board_region))
             
             if last_board is not None and np.array_equal(current_board, last_board):
@@ -254,30 +262,41 @@ class Match3Solver:
             last_board = current_board
 
             # Check for popup every 1.5 seconds
-            if time.time() - start_time >= 1.5:
+            if time.time() - total_time >= 1.5:
+                self.current_task = "locate_objects"
+                self.print_averages()
                 objects = self.locate_objects(known_objects)
                 if len(objects) < 42:
-                    print(f"Popup detected. Found {len(objects)} objects.")
+                    self.popup_shown = True
+                    self.print_averages()
                     known_objects = objects
+                    self.current_task = "find_match_outside_popup"
+                    self.print_averages()
                     match = self.find_match_outside_popup(objects)
                 else:
+                    self.current_task = "find_match"
+                    self.print_averages()
                     match = self.find_match(objects)
                     
                 # Try to find a match even if the popup is up
                 if match:
+                    self.current_task = "make_move"
+                    self.print_averages()
                     self.make_move(*match)
                     total_time = time.time() - start_time  # Calculate total time
                     self.total_move_times.append(total_time)  # Append total time
-                    start_time = time.time()  # Reset the timer
                     last_board = None
+                    self.print_averages()
                     known_objects = {}
+                    start_time = time.time()  # Reset the timer after a move
                 else:
                     print("No moves found")
 
-            time.sleep(check_interval)
+            if time.time() - start_time >= max_wait_time:
+                print("Board did not stabilize within the maximum wait time.")
+                return False
 
-        print("Board did not stabilize within the maximum wait time.")
-        return False
+            time.sleep(check_interval)
 
     def find_match_outside_popup(self, objects):
         start_time = time.time()
@@ -359,22 +378,26 @@ class Match3Solver:
         print(f"Avg. time to make move: {avg_move:.2f}s")
         print(f"Avg. time waiting for board stability: {avg_stability:.2f}s")
         print(f"Avg. total time: {avg_total:.2f}s")
+        print(f"popup_shown={self.popup_shown}")
+        print(f"current_task={self.current_task}")
 
     def play(self):
         while self.running:
             move_start_time = time.time()
-            # print("Starting new move...")
             objects = self.locate_objects()
             if len(objects) != 42:
-                print(f"Expected 42 objects, but found {len(objects)}")
-                break
-            match = self.find_match(objects)
+                match = self.find_match_outside_popup(objects)
+            else:
+                match = self.find_match(objects)
             if match:
                 self.make_move(*match)
-                self.wait_for_board_stability()
-                total_move_time = time.time() - move_start_time
-                self.total_move_times.append(total_move_time)
-                self.print_averages()
+                if self.wait_for_board_stability():
+                    total_move_time = time.time() - move_start_time
+                    self.total_move_times.append(total_move_time)
+                    self.print_averages()
+                else:
+                    print("Board did not stabilize")
+                    break
             else:
                 print("No moves found")
                 break
@@ -392,6 +415,6 @@ class Match3Solver:
         listener.start()
 
 if __name__ == "__main__":
-    multiprocessing.freeze_support() 
+    multiprocessing.freeze_support()
     bot = Match3Solver()
     bot.play()
