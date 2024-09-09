@@ -46,7 +46,7 @@ class Match3Solver:
         self.setup_key_listener()
 
     def load_templates(self):
-        # Load template images for each object
+        start_time = time.time()
         templates = {
             'object1': cv2.imread('object1_template.png'),
             'object2': cv2.imread('object2_template.png'),
@@ -58,11 +58,13 @@ class Match3Solver:
         for name, template in templates.items():
             if template is None:
                 print(f"Failed to load template: {name}")
-            else:
-                print(f"Loaded template: {name} - Shape: {template.shape}")
+            # else:
+                # print(f"Loaded template: {name} - Shape: {template.shape}")
+        print(f"Time to load templates: {time.time() - start_time:.2f} seconds")
         return templates
 
     def detect_game_board(self, likely_top_left=(745, 186), likely_bottom_right=(1366, 906)):
+        start_time = time.time()
         # If likely_bottom_right is not provided, use the full screen
         if likely_bottom_right is None:
             likely_bottom_right = pyautogui.size()
@@ -86,10 +88,12 @@ class Match3Solver:
         top_left = (roi_left + max_loc[0], roi_top + max_loc[1])
         h, w = template_rgb.shape[:2]
 
+        print(f"Time to detect game board: {time.time() - start_time:.2f} seconds")
         return (top_left[0], top_left[1], w, h)
 
 
     def locate_objects(self):
+        start_time = time.time()
         # Capture the game board region
         board_img = np.array(pyautogui.screenshot(region=self.board_region))
         board_rgb = cv2.cvtColor(board_img, cv2.COLOR_BGR2RGB)
@@ -99,18 +103,18 @@ class Match3Solver:
         cell_width = self.board_region[2] // grid_size[0]
         cell_height = self.board_region[3] // grid_size[1]
 
-        # Pre-compute scaled templates
+        # Pre-compute scaled templates with fewer scales
         scaled_templates = {}
         for obj_name, template in self.templates.items():
             scaled_templates[obj_name] = [cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR) 
-                                          for scale in np.linspace(0.8, 1.2, 5)]
+                                          for scale in np.linspace(0.9, 1.1, 3)]  # Reduced to 3 scales
 
         # Prepare arguments for multiprocessing
         args = [(self, x, y, board_rgb, cell_width, cell_height, scaled_templates) 
                 for x in range(grid_size[0]) for y in range(grid_size[1])]
 
         # Use multiprocessing to process cells in parallel
-        with multiprocessing.Pool() as pool:
+        with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:  # Ensure full CPU utilization
             results = pool.map(process_cell, args)
 
         objects = dict(results)
@@ -119,10 +123,11 @@ class Match3Solver:
             print(f"Expected 42 objects, but found {len(objects)}")
             return {}
 
-        print(f"Detected {len(objects)} unique objects")
+        print(f"Time to locate objects: {time.time() - start_time:.2f} seconds")
         return objects
 
     def find_match(self, objects):
+        start_time = time.time()
         # Initialize a 2D list to store object names for readability
         grid_size = (6, 7)
         readable_grid = [['unknown' for _ in range(grid_size[1])] for _ in range(grid_size[0])]
@@ -130,10 +135,6 @@ class Match3Solver:
         # Populate the readable grid with object names
         for (grid_col, grid_row), (_, obj_name) in objects.items():
             readable_grid[grid_col][grid_row] = obj_name
-
-        # Print the readable grid
-        for row in range(grid_size[1]):
-            print(' '.join(readable_grid[col][row] for col in range(grid_size[0])))
 
         def is_valid(x, y):
             return 0 <= x < grid_size[0] and 0 <= y < grid_size[1]
@@ -206,6 +207,7 @@ class Match3Solver:
 
         swaps = find_all_swaps()
         best_match = backtrack(swaps)
+        print(f"Time to find match: {time.time() - start_time:.2f} seconds")
         return best_match
 
     # Function for smoothly moving the cursor and holding down the mouse button until the movement is completed
@@ -214,15 +216,13 @@ class Match3Solver:
         return math.sqrt((point1[0] - point2[0]) ** 2 + (point1[1] - point2[1]) ** 2)
 
     def make_move(self, start, end):
+        start_time = time.time()
         # Verify that the board region is correctly identified
         if self.board_region is None or len(self.board_region) != 4:
             raise ValueError("Board region is not correctly defined.")
         
         # Unpack board_region
         top_left_x, top_left_y, board_width, board_height = self.board_region
-        
-        # Debug: Print out the board region
-        print(f"Board region: {self.board_region}")
         
         # Grid size (assumed 6x7, adjust if different)
         grid_columns = 6
@@ -231,9 +231,6 @@ class Match3Solver:
         # Calculate cell dimensions
         cell_width = board_width // grid_columns
         cell_height = board_height // grid_rows
-        
-        # Debug: Print out cell dimensions
-        print(f"Cell width: {cell_width}, Cell height: {cell_height}")
         
         # Extract start and end positions
         start_x, start_y = start
@@ -246,13 +243,7 @@ class Match3Solver:
         # Calculate the center of the ending grid cell
         end_center_x = top_left_x + (end_x * cell_width) + (cell_width // 2)
         end_center_y = top_left_y + (end_y * cell_height) + (cell_height // 2)
-        
-        # Debugging output
-        print(f"Start Center: ({start_center_x}, {start_center_y})")
-        print(f"End Center: ({end_center_x}, {end_center_y})")
-        
-        # Adjust based on observed discrepancies
-        # You may need to add or subtract pixels to fine-tune the position.
+
         adjustment_x = 0
         adjustment_y = 0
         start_center_x += adjustment_x
@@ -267,17 +258,14 @@ class Match3Solver:
         pydirectinput.mouseDown()
         
         # drag to the end pos
-        pydirectinput.moveTo(end_center_x, end_center_y, duration=0.1)
-
-        # dont let go until we arrive
-        while Match3Solver.distance(pydirectinput.position(), (end_center_x, end_center_y)) > 2:  # Ignore distance to endpoint
-            time.sleep(0.1)
-        # let go
-        time.sleep(0.05)
+        pydirectinput.moveTo(end_center_x, end_center_y)
         pydirectinput.mouseUp()
 
+        print(f"Time to make move: {time.time() - start_time:.2f} seconds")
+
     def wait_for_board_stability(self, max_wait_time=10):
-        print("Waiting for board to stabilize...")
+        start_time = time.time()
+        # print("Waiting for board to stabilize...")
         start_time = time.time()
         last_board = None
 
@@ -288,7 +276,8 @@ class Match3Solver:
                 # Compare the current board with the last board
                 difference = np.sum(np.abs(current_board - last_board))
                 if difference == 0:
-                    print("Board has stabilized.")
+                    # print("Board has stabilized.")
+                    print(f"Time waiting for board stability: {time.time() - start_time:.2f} seconds")
                     return True
             
             last_board = current_board
@@ -299,17 +288,18 @@ class Match3Solver:
 
     def play(self):
         while self.running:
-            print("Capturing game board...")
+            move_start_time = time.time()
+            print("Starting new move...")
             objects = self.locate_objects()
             if len(objects) != 42:
                 print(f"Expected 42 objects, but found {len(objects)}")
                 break
-            print(f"Found {len(objects)} objects")
             match = self.find_match(objects)
             if match:
-                print(f"Found match: {match}")
+                total_move_time = time.time() - move_start_time
+                print(f"Total time for current move: {total_move_time:.2f} seconds")
+                # print(f"Found match: {match}")
                 self.make_move(*match)
-                # Wait for the board to stop moving before continuing
                 self.wait_for_board_stability()
             else:
                 print("No moves found")
