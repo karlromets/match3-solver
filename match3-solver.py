@@ -2,7 +2,6 @@ import pyautogui
 import cv2
 import numpy as np
 import time
-import threading
 from pynput import keyboard
 import math
 import pydirectinput
@@ -41,8 +40,8 @@ class Match3Solver:
         self.locate_times = []
         self.match_times = []
         self.move_times = []
-        self.stability_times = []
-        self.total_move_times = []
+        self.total_moves = 0
+        self.start_time = time.time()
 
     def load_templates(self):
         start_time = time.time()
@@ -104,7 +103,7 @@ class Match3Solver:
         scaled_templates = {}
         for obj_name, template in self.templates.items():
             scaled_templates[obj_name] = [cv2.resize(template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR) 
-                                        for scale in np.linspace(0.9, 1.1, 3)] 
+                                        for scale in np.linspace(0.9, 1.1, 3)]
 
         cell_regions = {}
         for x in range(grid_size[0]):
@@ -167,48 +166,41 @@ class Match3Solver:
         def evaluate_swap(x1, y1, x2, y2):
             readable_grid[x1][y1], readable_grid[x2][y2] = readable_grid[x2][y2], readable_grid[x1][y1]
             
-            max_length = 0
-            total_matches = 0
-            combo_score = 0
+            matches = []
             for dx, dy in [(1, 0), (0, 1)]:
                 for x, y in [(x1, y1), (x2, y2)]:
                     length = find_chain_length(x, y, dx, dy) + find_chain_length(x, y, -dx, -dy) - 1
                     if length >= 3:
-                        max_length = max(max_length, length)
-                        total_matches += 1
-                        combo_score += length * (grid_size[1] - y)  # Prioritize lower matches
+                        matches.append((length, y, dx == 0))  # (length, row, is_vertical)
             
             readable_grid[x1][y1], readable_grid[x2][y2] = readable_grid[x2][y2], readable_grid[x1][y1]
             
-            return max_length, total_matches, combo_score
+            return matches
 
-        def find_all_swaps():
-            swaps = []
-            for x in range(grid_size[0]):
-                for y in range(grid_size[1]):
-                    if is_valid(x + 1, y):
-                        swaps.append(((x, y), (x + 1, y)))
-                    if is_valid(x, y + 1):
-                        swaps.append(((x, y), (x, y + 1)))
-            return swaps
+        def score_matches(matches):
+            if not matches:
+                return -1
+            combo = len(matches)
+            max_length = max(match[0] for match in matches)
+            is_vertical = any(match[2] for match in matches)
+            lowest_row = max(match[1] for match in matches)
+            
+            # Prioritize: 1. Combos, 2. Length, 3. Vertical, 4. Lowest row
+            return (combo * 1000000) + (max_length * 10000) + (is_vertical * 100) + (lowest_row)
 
-        swaps = find_all_swaps()
         best_swap = None
         best_score = -1
 
-        for swap in swaps:
-            (x1, y1), (x2, y2) = swap
-            max_length, total_matches, combo_score = evaluate_swap(x1, y1, x2, y2)
-            
-            # Prioritize vertical matches slightly
-            vertical_bonus = 1.1 if abs(y2 - y1) == 1 else 1
-            
-            # Calculate overall score
-            score = (max_length * 2 + total_matches * 3 + combo_score) * vertical_bonus
-            
-            if score > best_score:
-                best_score = score
-                best_swap = swap
+        for x in range(grid_size[0]):
+            for y in range(grid_size[1]):
+                for dx, dy in [(1, 0), (0, 1)]:
+                    nx, ny = x + dx, y + dy
+                    if is_valid(nx, ny):
+                        matches = evaluate_swap(x, y, nx, ny)
+                        score = score_matches(matches)
+                        if score > best_score:
+                            best_score = score
+                            best_swap = ((x, y), (nx, ny))
 
         match_time = time.time() - start_time
         self.match_times.append(match_time)
@@ -250,6 +242,7 @@ class Match3Solver:
 
         move_time = time.time() - start_time
         self.move_times.append(move_time)
+        self.total_moves += 1
 
     def wait_for_board_stability(self, max_wait_time=10):
         function_start_time = time.time()  # Start timing the entire function execution
@@ -263,9 +256,7 @@ class Match3Solver:
             
             if last_board is not None and np.array_equal(current_board, last_board):
                 stability_time = time.time() - start_time
-                self.stability_times.append(stability_time)
                 function_duration = time.time() - function_start_time  # Calculate total function duration
-                self.stability_times.append(function_duration)  # Append total function duration
                 return True
             
             last_board = current_board
@@ -293,7 +284,6 @@ class Match3Solver:
 
         print("Board did not stabilize within the maximum wait time.")
         function_duration = time.time() - function_start_time  # Calculate total function duration
-        self.stability_times.append(function_duration)  # Append total function duration
         return False
 
     def find_match_outside_popup(self, objects):
@@ -368,16 +358,18 @@ class Match3Solver:
         avg_locate = sum(self.locate_times) / len(self.locate_times) if self.locate_times else 0
         avg_match = sum(self.match_times) / len(self.match_times) if self.match_times else 0
         avg_move = sum(self.move_times) / len(self.move_times) if self.move_times else 0
-        avg_stability = sum(self.stability_times) / len(self.stability_times) if self.stability_times else 0
         
         # Calculate avg_total as the sum of the other averages
-        avg_total = avg_locate + avg_match + avg_move + avg_stability
+        avg_total = avg_locate + avg_match + avg_move
+
+        current_time = time.time() - self.start_time
 
         print(f"Avg. time to locate objects: {avg_locate:.2f}s")
         print(f"Avg. time to find match: {avg_match:.2f}s")
         print(f"Avg. time to make move: {avg_move:.2f}s")
-        print(f"Avg. time waiting for board stability: {avg_stability:.2f}s")
         print(f"Avg. total time: {avg_total:.2f}s")
+        print(f"Total moves made: {self.total_moves}")
+        print(f"Current game time: {current_time:.2f}s")
 
     def play(self):
         while self.running:
